@@ -264,7 +264,7 @@ async function getWebAnalytics(env, requestHost, days = 7) {
           const mm = String(local.getUTCMonth() + 1).padStart(2, "0");
           const hh = String(local.getUTCHours()).padStart(2, "0");
           const mi = String(local.getUTCMinutes()).padStart(2, "0");
-          localLabel = \`\${dd}/\${mm} \${hh}:\${mi}\`;
+          localLabel = `${dd}/${mm} ${hh}:${mi}`;
         }
       }
       detail.push({
