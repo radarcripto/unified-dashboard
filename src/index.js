@@ -188,7 +188,82 @@ async function getWebAnalytics(env, requestHost, days = 7) {
             sum { visits }
             dimensions { refererHost }
           }
-          byDetail: rumPageloadEventsAdaptiveGroups(limit: 1000, filter: $filter) {
+        }
+      }
+    }
+  `;
+
+  const variables = {
+    accountTag: env.CF_ACCOUNT_TAG,
+    filter: {
+      AND: [
+        { datetime_geq: start.toISOString(), datetime_leq: end.toISOString() },
+        { requestHost }
+      ]
+    }
+  };
+
+  try {
+
+    const response = await fetch("https://api.cloudflare.com/client/v4/graphql", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + env.CF_API_TOKEN,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ query, variables })
+    });
+
+    const json = await response.json();
+
+    if (!response.ok || json.errors) {
+      return { total: 0, byCountry: {}, byDay: {}, byReferer: {}, error: json.errors ? JSON.stringify(json.errors) : "HTTP " + response.status };
+    }
+
+    const account = json?.data?.viewer?.accounts?.[0] || {};
+
+    const byCountry = {};
+    let total = 0;
+    for (const g of account.byCountry || []) {
+      const country = g.dimensions?.countryName || "??";
+      byCountry[country] = (byCountry[country] || 0) + (g.sum?.visits || 0);
+      total += g.sum?.visits || 0;
+    }
+
+    const byDay = {};
+    for (const g of account.byDay || []) {
+      const day = g.dimensions?.date || "??";
+      byDay[day] = (byDay[day] || 0) + (g.sum?.visits || 0);
+    }
+
+    const byReferer = {};
+    for (const g of account.byReferer || []) {
+      // referrer vacío = entró directo (escribió la URL, marcador, app) — sin origen externo
+      const referer = g.dimensions?.refererHost || "(directo / sin origen)";
+      byReferer[referer] = (byReferer[referer] || 0) + (g.sum?.visits || 0);
+    }
+
+    return { total, byCountry, byDay, byReferer };
+
+  } catch (err) {
+    return { total: 0, byCountry: {}, byDay: {}, byReferer: {}, error: err.message };
+  }
+
+}
+
+/** Trae el detalle de visitas de las últimas `hours` horas (origen + fecha/hora
+ * exacta, convertida a ART). Consulta separada de getWebAnalytics porque usa
+ * una ventana de tiempo distinta (48hs en vez de 7 días). */
+async function getRecentVisitDetail(env, requestHost, hours = 48) {
+
+  const end = new Date();
+  const start = new Date(end.getTime() - hours * 60 * 60 * 1000);
+
+  const query = `
+    query RecentVisits($accountTag: string!, $filter: AccountRumPageloadEventsAdaptiveGroupsFilter_InputObject) {
+      viewer {
+        accounts(filter: { accountTag: $accountTag }) {
+          rumPageloadEventsAdaptiveGroups(limit: 1000, filter: $filter) {
             sum { visits }
             dimensions { refererHost datetimeMinute }
           }
@@ -221,37 +296,13 @@ async function getWebAnalytics(env, requestHost, days = 7) {
     const json = await response.json();
 
     if (!response.ok || json.errors) {
-      return { total: 0, byCountry: {}, byDay: {}, byReferer: {}, detail: [], error: json.errors ? JSON.stringify(json.errors) : "HTTP " + response.status };
+      return { detail: [], error: json.errors ? JSON.stringify(json.errors) : "HTTP " + response.status };
     }
 
-    const account = json?.data?.viewer?.accounts?.[0] || {};
+    const groups = json?.data?.viewer?.accounts?.[0]?.rumPageloadEventsAdaptiveGroups || [];
 
-    const byCountry = {};
-    let total = 0;
-    for (const g of account.byCountry || []) {
-      const country = g.dimensions?.countryName || "??";
-      byCountry[country] = (byCountry[country] || 0) + (g.sum?.visits || 0);
-      total += g.sum?.visits || 0;
-    }
-
-    const byDay = {};
-    for (const g of account.byDay || []) {
-      const day = g.dimensions?.date || "??";
-      byDay[day] = (byDay[day] || 0) + (g.sum?.visits || 0);
-    }
-
-    const byReferer = {};
-    for (const g of account.byReferer || []) {
-      // referrer vacío = entró directo (escribió la URL, marcador, app) — sin origen externo
-      const referer = g.dimensions?.refererHost || "(directo / sin origen)";
-      byReferer[referer] = (byReferer[referer] || 0) + (g.sum?.visits || 0);
-    }
-
-    // Tabla simple: cada fila es una combinación real de origen + momento exacto.
-    // datetimeMinute viene como timestamp completo (ej: "2026-08-27T14:32:00Z");
-    // lo convertimos a ART (UTC-3) y mostramos fecha + hora:minuto real.
     const detail = [];
-    for (const g of account.byDetail || []) {
+    for (const g of groups) {
       const minuteRaw = g.dimensions?.datetimeMinute;
       let localLabel = "?";
       let ts = 0;
@@ -274,24 +325,32 @@ async function getWebAnalytics(env, requestHost, days = 7) {
         visits: g.sum?.visits || 0
       });
     }
-    detail.sort((a, b) => b.ts - a.ts); // más reciente primero
+    detail.sort((a, b) => b.ts - a.ts);
 
-    return { total, byCountry, byDay, byReferer, detail: detail.slice(0, 30) };
+    return { detail: detail.slice(0, 30) };
 
   } catch (err) {
-    return { total: 0, byCountry: {}, byDay: {}, byReferer: {}, detail: [], error: err.message };
+    return { detail: [], error: err.message };
   }
 
 }
 
 async function gatherAllData(env) {
-  const [leads, watchlist, accounts, radarVisits, guardianVisits] = await Promise.all([
+  const [leads, watchlist, accounts, radarVisits, guardianVisits, radarRecent, guardianRecent] = await Promise.all([
     getArrayKey(env.RADAR_KV, "leads"),
     getArrayKey(env.GUARDIAN_KV, "watchlist"),
     getCachedAccounts(env),
     getWebAnalytics(env, "crypto-radar-1c9.pages.dev", 7),
     getWebAnalytics(env, "wallet-guardian.pages.dev", 7),
+    getRecentVisitDetail(env, "crypto-radar-1c9.pages.dev", 48),
+    getRecentVisitDetail(env, "wallet-guardian.pages.dev", 48),
   ]);
+
+  // El detalle (origen + fecha/hora) es de las últimas 48hs — se guarda
+  // aparte de "visits" (que sigue siendo la ventana de 7 días para el
+  // gráfico de país/día), así cada card usa la ventana que corresponde.
+  radarVisits.detail = radarRecent.detail || [];
+  guardianVisits.detail = guardianRecent.detail || [];
 
   // Leads: más recientes primero (sí tienen ts)
   leads.sort((a, b) => (b.ts || 0) - (a.ts || 0));
