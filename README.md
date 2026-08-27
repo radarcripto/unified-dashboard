@@ -5,7 +5,7 @@ y cuentas/planes de ambos proyectos, sin entrar a la consola de
 Cloudflare a buscar en cada KV.
 
 ## Estructura real de datos (ya confirmada)
-
+ 
 - `radar-kv` → key `leads`: un único array `[{email, interest, ts}, ...]`
 - `wallet-guardian-kv` → key `watchlist`: un único array `[{address, email}, ...]`
 - `wallet-guardian-kv` → prefijo `account:<uuid>`: uno por cuenta, `{plan, createdAt}`
