@@ -190,7 +190,7 @@ async function getWebAnalytics(env, requestHost, days = 7) {
           }
           byDetail: rumPageloadEventsAdaptiveGroups(limit: 1000, filter: $filter) {
             sum { visits }
-            dimensions { refererHost datetimeMinute requestPath }
+            dimensions { refererHost datetimeMinute }
           }
         }
       }
@@ -247,27 +247,34 @@ async function getWebAnalytics(env, requestHost, days = 7) {
       byReferer[referer] = (byReferer[referer] || 0) + (g.sum?.visits || 0);
     }
 
-    // Tabla simple: cada fila es una combinación real de origen + hora + URL.
-    // datetimeMinute viene como timestamp completo (ej: "2026-08-27T14:32:00Z"),
-    // así que parseamos la hora real con Date en vez de asumir un número 0-23.
+    // Tabla simple: cada fila es una combinación real de origen + momento exacto.
+    // datetimeMinute viene como timestamp completo (ej: "2026-08-27T14:32:00Z");
+    // lo convertimos a ART (UTC-3) y mostramos fecha + hora:minuto real.
     const detail = [];
     for (const g of account.byDetail || []) {
       const minuteRaw = g.dimensions?.datetimeMinute;
-      let localHour = null;
+      let localLabel = "?";
+      let ts = 0;
       if (minuteRaw) {
         const d = new Date(minuteRaw);
         if (!isNaN(d.getTime())) {
-          localHour = ((d.getUTCHours() - 3) % 24 + 24) % 24; // UTC → ART (UTC-3)
+          ts = d.getTime();
+          const local = new Date(ts - 3 * 60 * 60 * 1000); // UTC → ART (UTC-3)
+          const dd = String(local.getUTCDate()).padStart(2, "0");
+          const mm = String(local.getUTCMonth() + 1).padStart(2, "0");
+          const hh = String(local.getUTCHours()).padStart(2, "0");
+          const mi = String(local.getUTCMinutes()).padStart(2, "0");
+          localLabel = \`\${dd}/\${mm} \${hh}:\${mi}\`;
         }
       }
       detail.push({
         referer: g.dimensions?.refererHost || "(directo / sin origen)",
-        hour: localHour,
-        path: g.dimensions?.requestPath || "(sin datos)",
+        when: localLabel,
+        ts,
         visits: g.sum?.visits || 0
       });
     }
-    detail.sort((a, b) => b.visits - a.visits);
+    detail.sort((a, b) => b.ts - a.ts); // más reciente primero
 
     return { total, byCountry, byDay, byReferer, detail: detail.slice(0, 30) };
 
@@ -504,8 +511,7 @@ function renderOriginHourCard(title, visits){
     ? detail.map(d =>
         \`<div class="item" style="display:flex;justify-content:space-between;gap:.5rem">
           <span>\${d.referer}</span>
-          <span class="meta">\${d.hour !== null ? d.hour + "hs" : "?"}</span>
-          <span class="meta" style="flex:1;text-align:right">\${truncate(d.path, 40)}</span>
+          <span class="meta" style="flex:1;text-align:right">\${d.when}</span>
           <span class="badge" style="flex-shrink:0">\${d.visits}</span>
         </div>\`
       ).join("")
@@ -513,9 +519,9 @@ function renderOriginHourCard(title, visits){
 
   return \`<div class="card">
       <h2>🌐 Origen y horario — \${title}</h2>
-      <div class="note" style="margin-bottom:.3rem">Horario ART (UTC-3) · últimos 7 días</div>
+      <div class="note" style="margin-bottom:.3rem">Fecha y hora en ART (UTC-3) · más reciente primero</div>
       <div class="item" style="display:flex;justify-content:space-between;gap:.5rem;font-size:.7rem;color:#666;border-top:none">
-        <span>Origen</span><span>Hora</span><span style="flex:1;text-align:right">URL</span><span style="flex-shrink:0">Visitas</span>
+        <span>Origen</span><span style="flex:1;text-align:right">Fecha y hora</span><span style="flex-shrink:0">Visitas</span>
       </div>
       \${rows}
     </div>\`;
