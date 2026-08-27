@@ -18,6 +18,7 @@
  */
 
 const STATE_KEY = "dashboard:cron_state"; // guardado en RADAR_KV
+const ACCOUNTS_CACHE_KEY = "dashboard:accounts_cache"; // guardado en GUARDIAN_KV
 
 export default {
   async fetch(request, env, ctx) {
@@ -107,7 +108,10 @@ async function getArrayKey(kv, key) {
   }
 }
 
-/** Lista todas las keys con un prefijo y devuelve {key, ...value} por cada una. */
+/** Lista todas las keys con un prefijo y devuelve {key, ...value} por cada una.
+ * ⚠️ kv.list() consume el cupo de "list operations" (solo 1.000/día gratis,
+ * MUCHO más bajo que los reads). No llamar esto en cada request del
+ * dashboard — usar getCachedAccounts() en su lugar. */
 async function listByPrefix(kv, prefix) {
   const results = [];
   let cursor;
@@ -126,6 +130,31 @@ async function listByPrefix(kv, prefix) {
     cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor);
   return results;
+}
+
+/** Accounts vía un cache de UN solo key (get normal, no list). El cron
+ * es el único que refresca este cache llamando refreshAccountsCache();
+ * el dashboard en cada visita solo hace un get() barato. */
+async function getCachedAccounts(env) {
+  const raw = await env.GUARDIAN_KV.get(ACCOUNTS_CACHE_KEY);
+  if (raw) {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      // cache corrupto, seguimos al fallback de abajo
+    }
+  }
+  // Primera vez que corre esto (todavía no hay cache) — hacemos el
+  // list() una única vez y dejamos el cache armado para la próxima.
+  const accounts = await listByPrefix(env.GUARDIAN_KV, "account:");
+  await env.GUARDIAN_KV.put(ACCOUNTS_CACHE_KEY, JSON.stringify(accounts));
+  return accounts;
+}
+
+async function refreshAccountsCache(env) {
+  const accounts = await listByPrefix(env.GUARDIAN_KV, "account:");
+  await env.GUARDIAN_KV.put(ACCOUNTS_CACHE_KEY, JSON.stringify(accounts));
+  return accounts;
 }
 
 /** Trae visitas reales de Cloudflare Web Analytics (RUM) para un hostname,
@@ -204,7 +233,7 @@ async function gatherAllData(env) {
   const [leads, watchlist, accounts, radarVisits, guardianVisits] = await Promise.all([
     getArrayKey(env.RADAR_KV, "leads"),
     getArrayKey(env.GUARDIAN_KV, "watchlist"),
-    listByPrefix(env.GUARDIAN_KV, "account:"),
+    getCachedAccounts(env),
     getWebAnalytics(env, "crypto-radar-1c9.pages.dev", 7),
     getWebAnalytics(env, "wallet-guardian.pages.dev", 7),
   ]);
@@ -242,6 +271,12 @@ async function saveState(env, state) {
 
 async function checkForNewEntriesAndAlert(env) {
   const state = await loadState(env);
+
+  // El cron es el único lugar donde se refresca el cache de accounts
+  // (esto SÍ usa list(), pero solo 96 veces/día con el cron cada 15 min,
+  // muy por debajo del límite gratis de 1.000 list ops/día).
+  await refreshAccountsCache(env).catch(() => {});
+
   const data = await gatherAllData(env);
 
   const messages = [];
@@ -439,7 +474,7 @@ async function load(){
 }
 
 load();
-setInterval(load, 60000);
+setInterval(load, 300000); // 5 minutos — no hace falta más seguido, y cuida el cupo gratis de Cloudflare
 </script>
 </body></html>`;
 }
