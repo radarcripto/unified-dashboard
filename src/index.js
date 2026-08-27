@@ -143,7 +143,7 @@ async function getWebAnalytics(env, requestHost, days = 7) {
         accounts(filter: { accountTag: $accountTag }) {
           rumPageloadEventsAdaptiveGroups(limit: 1000, filter: $filter) {
             sum { visits }
-            dimensions { countryName }
+            dimensions { countryName date }
           }
         }
       }
@@ -180,16 +180,19 @@ async function getWebAnalytics(env, requestHost, days = 7) {
     const groups = json?.data?.viewer?.accounts?.[0]?.rumPageloadEventsAdaptiveGroups || [];
 
     const byCountry = {};
+    const byDay = {};
     let total = 0;
 
     for (const g of groups) {
       const country = g.dimensions?.countryName || "??";
+      const day = g.dimensions?.date || "??";
       const visits = g.sum?.visits || 0;
       byCountry[country] = (byCountry[country] || 0) + visits;
+      byDay[day] = (byDay[day] || 0) + visits;
       total += visits;
     }
 
-    return { total, byCountry };
+    return { total, byCountry, byDay };
 
   } catch (err) {
     return { total: 0, byCountry: {}, error: err.message };
@@ -371,15 +374,40 @@ function renderVisitsCard(title, visits){
         <div class="note">\${visits.error}</div>
       </div>\`;
   }
+
+  // Últimos 7 días en orden cronológico, con 0 para los días sin datos
+  const days = [];
+  const today = new Date();
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() - i);
+    days.push(d.toISOString().slice(0, 10));
+  }
+  const dayValues = days.map(d => (visits.byDay || {})[d] || 0);
+  const maxDay = Math.max(1, ...dayValues);
+
+  const barChart = \`<div style="display:flex;align-items:flex-end;gap:6px;height:60px;margin:.6rem 0 1rem">
+    \${days.map((d,i) => {
+      const h = Math.round((dayValues[i] / maxDay) * 50) + 2;
+      const label = d.slice(5).replace("-", "/"); // MM/DD
+      return \`<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px">
+        <div title="\${d}: \${dayValues[i]} visitas" style="width:100%;background:#4f7cff;border-radius:3px 3px 0 0;height:\${h}px"></div>
+        <div style="font-size:.6rem;color:#666">\${label}</div>
+      </div>\`;
+    }).join("")}
+  </div>\`;
+
   const countryEntries = Object.entries(visits.byCountry || {}).sort((a,b) => b[1]-a[1]).slice(0,8);
   const rows = countryEntries.length
     ? countryEntries.map(([country,count]) =>
         \`<div class="item">\${country} <span class="meta">\${count} visita\${count===1?"":"s"}</span></div>\`
       ).join("")
     : '<div class="empty">Sin visitas registradas todavía</div>';
+
   return \`<div class="card">
       <h2>\${title} <span class="badge">\${visits.total || 0}</span></h2>
-      <div class="note" style="margin-bottom:.5rem">Últimos 7 días · por país (datos reales de Cloudflare Web Analytics)</div>
+      <div class="note" style="margin-bottom:.3rem">Últimos 7 días (datos reales de Cloudflare Web Analytics)</div>
+      \${barChart}
       \${rows}
     </div>\`;
 }
