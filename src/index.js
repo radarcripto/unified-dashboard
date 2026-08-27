@@ -1,5 +1,5 @@
 /**
- * UNIFIED DASHBOARD — Crypto Radar + Wallet Guardian
+ * UNIFIED DASHBOARD — Crypto Radar + Wallet Guardian 
  * ---------------------------------------------------
  * Estructura real de los KV (confirmada por inspección):
  *
