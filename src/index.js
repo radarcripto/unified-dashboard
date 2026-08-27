@@ -192,6 +192,10 @@ async function getWebAnalytics(env, requestHost, days = 7) {
             sum { visits }
             dimensions { datetimeHour }
           }
+          byDetail: rumPageloadEventsAdaptiveGroups(limit: 1000, filter: $filter) {
+            sum { visits }
+            dimensions { refererHost datetimeHour requestPath }
+          }
         }
       }
     }
@@ -257,7 +261,23 @@ async function getWebAnalytics(env, requestHost, days = 7) {
       byHour[localHour] = (byHour[localHour] || 0) + (g.sum?.visits || 0);
     }
 
-    return { total, byCountry, byDay, byReferer, byHour };
+    // Tabla simple: cada fila es una combinación real de origen + hora + URL
+    const detail = [];
+    for (const g of account.byDetail || []) {
+      const utcHour = g.dimensions?.datetimeHour;
+      const localHour = (utcHour === undefined || utcHour === null)
+        ? null
+        : ((Number(utcHour) - 3) % 24 + 24) % 24;
+      detail.push({
+        referer: g.dimensions?.refererHost || "(directo / sin origen)",
+        hour: localHour,
+        path: g.dimensions?.requestPath || "/",
+        visits: g.sum?.visits || 0
+      });
+    }
+    detail.sort((a, b) => b.visits - a.visits);
+
+    return { total, byCountry, byDay, byReferer, byHour, detail: detail.slice(0, 30) };
 
   } catch (err) {
     return { total: 0, byCountry: {}, byDay: {}, byReferer: {}, byHour: {}, error: err.message };
@@ -486,33 +506,26 @@ function renderVisitsCard(title, visits){
 function renderOriginHourCard(title, visits){
   if (visits.error) return ""; // el error ya se muestra en la card de Visitantes de al lado
 
-  const refererEntries = Object.entries(visits.byReferer || {}).sort((a,b) => b[1]-a[1]).slice(0,6);
-  const refererRows = refererEntries.length
-    ? refererEntries.map(([ref,count]) =>
-        \`<div class="item">\${ref} <span class="meta">\${count} visita\${count===1?"":"s"}</span></div>\`
+  const detail = visits.detail || [];
+
+  const rows = detail.length
+    ? detail.map(d =>
+        \`<div class="item" style="display:flex;justify-content:space-between;gap:.5rem">
+          <span>\${d.referer}</span>
+          <span class="meta">\${d.hour !== null ? d.hour + "hs" : "?"}</span>
+          <span class="meta" style="flex:1;text-align:right">\${truncate(d.path, 40)}</span>
+          <span class="badge" style="flex-shrink:0">\${d.visits}</span>
+        </div>\`
       ).join("")
-    : '<div class="empty">Sin datos de origen todavía</div>';
-
-  // 24 horas, en orden 0..23 (ya convertidas a ART en getWebAnalytics)
-  const hourValues = Array.from({length: 24}, (_, h) => (visits.byHour || {})[h] || 0);
-  const maxHour = Math.max(1, ...hourValues);
-
-  const hourChart = \`<div style="display:flex;align-items:flex-end;gap:2px;height:50px;margin:.6rem 0 1rem">
-    \${hourValues.map((v,h) => {
-      const barH = Math.round((v / maxHour) * 42) + 1;
-      return \`<div title="\${h}hs: \${v} visitas" style="flex:1;background:#4f7cff;border-radius:2px 2px 0 0;height:\${barH}px"></div>\`;
-    }).join("")}
-  </div>
-  <div style="display:flex;justify-content:space-between;font-size:.6rem;color:#666;margin-top:-.6rem;margin-bottom:1rem">
-    <span>0h</span><span>6h</span><span>12h</span><span>18h</span><span>23h</span>
-  </div>\`;
+    : '<div class="empty">Sin datos todavía</div>';
 
   return \`<div class="card">
       <h2>🌐 Origen y horario — \${title}</h2>
-      <div class="note" style="margin-bottom:.3rem">Horario en ART (UTC-3) · últimos 7 días</div>
-      \${hourChart}
-      <div class="note" style="margin-bottom:.3rem">De dónde vienen</div>
-      \${refererRows}
+      <div class="note" style="margin-bottom:.3rem">Horario ART (UTC-3) · últimos 7 días</div>
+      <div class="item" style="display:flex;justify-content:space-between;gap:.5rem;font-size:.7rem;color:#666;border-top:none">
+        <span>Origen</span><span>Hora</span><span style="flex:1;text-align:right">URL</span><span style="flex-shrink:0">Visitas</span>
+      </div>
+      \${rows}
     </div>\`;
 }
 
