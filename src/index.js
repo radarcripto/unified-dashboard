@@ -158,21 +158,39 @@ async function refreshAccountsCache(env) {
 }
 
 /** Trae visitas reales de Cloudflare Web Analytics (RUM) para un hostname,
- * agregadas por país, de los últimos `days` días. Requiere que Web Analytics
- * esté habilitado para ese sitio en Cloudflare (Pages → proyecto → Metrics
- * → Enable Web Analytics), y los secrets CF_API_TOKEN + CF_ACCOUNT_TAG. */
+ * de los últimos `days` días: total, por país, por día, por referrer
+ * (de dónde vino la visita) y por hora del día (convertida a ART, UTC-3).
+ * Requiere que Web Analytics esté habilitado para ese sitio en Cloudflare
+ * (Pages → proyecto → Metrics → Enable Web Analytics), y los secrets
+ * CF_API_TOKEN + CF_ACCOUNT_TAG. */
 async function getWebAnalytics(env, requestHost, days = 7) {
 
   const end = new Date();
   const start = new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
 
+  // Usamos alias para pedir 4 agrupaciones distintas en una sola consulta,
+  // en vez de combinar todas las dimensiones juntas (eso multiplicaría la
+  // cantidad de grupos sin necesidad, ya que solo nos interesa cada
+  // dimensión por separado).
   const query = `
     query WebAnalytics($accountTag: string!, $filter: AccountRumPageloadEventsAdaptiveGroupsFilter_InputObject) {
       viewer {
         accounts(filter: { accountTag: $accountTag }) {
-          rumPageloadEventsAdaptiveGroups(limit: 1000, filter: $filter) {
+          byCountry: rumPageloadEventsAdaptiveGroups(limit: 1000, filter: $filter) {
             sum { visits }
-            dimensions { countryName date }
+            dimensions { countryName }
+          }
+          byDay: rumPageloadEventsAdaptiveGroups(limit: 1000, filter: $filter) {
+            sum { visits }
+            dimensions { date }
+          }
+          byReferer: rumPageloadEventsAdaptiveGroups(limit: 1000, filter: $filter) {
+            sum { visits }
+            dimensions { refererHost }
+          }
+          byHour: rumPageloadEventsAdaptiveGroups(limit: 1000, filter: $filter) {
+            sum { visits }
+            dimensions { datetimeHour }
           }
         }
       }
@@ -203,28 +221,46 @@ async function getWebAnalytics(env, requestHost, days = 7) {
     const json = await response.json();
 
     if (!response.ok || json.errors) {
-      return { total: 0, byCountry: {}, error: json.errors ? JSON.stringify(json.errors) : "HTTP " + response.status };
+      return { total: 0, byCountry: {}, byDay: {}, byReferer: {}, byHour: {}, error: json.errors ? JSON.stringify(json.errors) : "HTTP " + response.status };
     }
 
-    const groups = json?.data?.viewer?.accounts?.[0]?.rumPageloadEventsAdaptiveGroups || [];
+    const account = json?.data?.viewer?.accounts?.[0] || {};
 
     const byCountry = {};
-    const byDay = {};
     let total = 0;
-
-    for (const g of groups) {
+    for (const g of account.byCountry || []) {
       const country = g.dimensions?.countryName || "??";
-      const day = g.dimensions?.date || "??";
-      const visits = g.sum?.visits || 0;
-      byCountry[country] = (byCountry[country] || 0) + visits;
-      byDay[day] = (byDay[day] || 0) + visits;
-      total += visits;
+      byCountry[country] = (byCountry[country] || 0) + (g.sum?.visits || 0);
+      total += g.sum?.visits || 0;
     }
 
-    return { total, byCountry, byDay };
+    const byDay = {};
+    for (const g of account.byDay || []) {
+      const day = g.dimensions?.date || "??";
+      byDay[day] = (byDay[day] || 0) + (g.sum?.visits || 0);
+    }
+
+    const byReferer = {};
+    for (const g of account.byReferer || []) {
+      // referrer vacío = entró directo (escribió la URL, marcador, app) — sin origen externo
+      const referer = g.dimensions?.refererHost || "(directo / sin origen)";
+      byReferer[referer] = (byReferer[referer] || 0) + (g.sum?.visits || 0);
+    }
+
+    // Cloudflare devuelve la hora en UTC — la convertimos a ART (UTC-3)
+    // para que tenga sentido de un vistazo.
+    const byHour = {};
+    for (const g of account.byHour || []) {
+      const utcHour = g.dimensions?.datetimeHour;
+      if (utcHour === undefined || utcHour === null) continue;
+      const localHour = ((Number(utcHour) - 3) % 24 + 24) % 24;
+      byHour[localHour] = (byHour[localHour] || 0) + (g.sum?.visits || 0);
+    }
+
+    return { total, byCountry, byDay, byReferer, byHour };
 
   } catch (err) {
-    return { total: 0, byCountry: {}, error: err.message };
+    return { total: 0, byCountry: {}, byDay: {}, byReferer: {}, byHour: {}, error: err.message };
   }
 
 }
@@ -447,6 +483,39 @@ function renderVisitsCard(title, visits){
     </div>\`;
 }
 
+function renderOriginHourCard(title, visits){
+  if (visits.error) return ""; // el error ya se muestra en la card de Visitantes de al lado
+
+  const refererEntries = Object.entries(visits.byReferer || {}).sort((a,b) => b[1]-a[1]).slice(0,6);
+  const refererRows = refererEntries.length
+    ? refererEntries.map(([ref,count]) =>
+        \`<div class="item">\${ref} <span class="meta">\${count} visita\${count===1?"":"s"}</span></div>\`
+      ).join("")
+    : '<div class="empty">Sin datos de origen todavía</div>';
+
+  // 24 horas, en orden 0..23 (ya convertidas a ART en getWebAnalytics)
+  const hourValues = Array.from({length: 24}, (_, h) => (visits.byHour || {})[h] || 0);
+  const maxHour = Math.max(1, ...hourValues);
+
+  const hourChart = \`<div style="display:flex;align-items:flex-end;gap:2px;height:50px;margin:.6rem 0 1rem">
+    \${hourValues.map((v,h) => {
+      const barH = Math.round((v / maxHour) * 42) + 1;
+      return \`<div title="\${h}hs: \${v} visitas" style="flex:1;background:#4f7cff;border-radius:2px 2px 0 0;height:\${barH}px"></div>\`;
+    }).join("")}
+  </div>
+  <div style="display:flex;justify-content:space-between;font-size:.6rem;color:#666;margin-top:-.6rem;margin-bottom:1rem">
+    <span>0h</span><span>6h</span><span>12h</span><span>18h</span><span>23h</span>
+  </div>\`;
+
+  return \`<div class="card">
+      <h2>🌐 Origen y horario — \${title}</h2>
+      <div class="note" style="margin-bottom:.3rem">Horario en ART (UTC-3) · últimos 7 días</div>
+      \${hourChart}
+      <div class="note" style="margin-bottom:.3rem">De dónde vienen</div>
+      \${refererRows}
+    </div>\`;
+}
+
 async function load(){
   document.getElementById("updated").textContent = "Actualizando...";
   const res = await fetch("/api/data");
@@ -467,7 +536,10 @@ async function load(){
       a => \`Plan: \${truncate(a.plan) || "?"}<div class="meta">\${fmtDate(a.createdAt)}</div>\`) +
 
     renderVisitsCard("📈 Visitantes — Crypto Radar", data.radar.visits) +
-    renderVisitsCard("📈 Visitantes — Wallet Guardian", data.guardian.visits);
+    renderVisitsCard("📈 Visitantes — Wallet Guardian", data.guardian.visits) +
+
+    renderOriginHourCard("Crypto Radar", data.radar.visits) +
+    renderOriginHourCard("Wallet Guardian", data.guardian.visits);
 
   document.getElementById("updated").textContent =
     "Última actualización: " + new Date(data.generated_at).toLocaleString("es-AR");
