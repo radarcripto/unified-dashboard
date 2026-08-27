@@ -20,15 +20,12 @@ id = "6617361c7d3e479d8a705afa8d10ff0a"  # wallet-guardian-kv
 crons = ["*/15 * * * *"]
 
 # ── Variables de entorno / secrets ──
-# NO pongas valores reales acá — usá `wrangler secret put <NOMBRE>` para
-# cada uno de estos, así no quedan en texto plano en el repo:
-#   wrangler secret put DASH_PASSWORD
-#   wrangler secret put DASH_PASSWORD_HASH
-#   wrangler secret put TELEGRAM_BOT_TOKEN
-#   wrangler secret put TELEGRAM_CHAT_ID
-#
-# DASH_PASSWORD_HASH puede ser simplemente otro string secreto fijo que
-# uses como "firma" de sesión (no hace falta que sea un hash real, es
-# solo para que la cookie no sea adivinable). Ejemplo:
-#   wrangler secret put DASH_PASSWORD_HASH
-#   (pegás un string random largo, tipo el output de `openssl rand -hex 32`)
+# NO pongas valores reales acá. Cargalos desde el dashboard de Cloudflare:
+#   Workers & Pages → unified-dashboard → Settings → Variables and Secrets
+#   → Add → marcá cada una como "Secret" (encrypted), no "Text":
+#     - DASH_PASSWORD        → la password para entrar al dashboard
+#     - DASH_PASSWORD_HASH   → un string random largo, cualquiera, solo
+#                              para que la cookie de sesión no sea
+#                              adivinable (no hace falta que sea un hash real)
+#     - TELEGRAM_BOT_TOKEN   → podés reusar el mismo bot de Wallet Guardian
+#     - TELEGRAM_CHAT_ID
