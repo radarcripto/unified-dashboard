@@ -1,5 +1,5 @@
 /**
- * UNIFIED DASHBOARD — Crypto Radar + Wallet Guardian 
+ * UNIFIED DASHBOARD — Crypto Radar + Wallet Guardian
  * ---------------------------------------------------
  * Estructura real de los KV (confirmada por inspección):
  *
@@ -128,11 +128,82 @@ async function listByPrefix(kv, prefix) {
   return results;
 }
 
+/** Trae visitas reales de Cloudflare Web Analytics (RUM) para un hostname,
+ * agregadas por país, de los últimos `days` días. Requiere que Web Analytics
+ * esté habilitado para ese sitio en Cloudflare (Pages → proyecto → Metrics
+ * → Enable Web Analytics), y los secrets CF_API_TOKEN + CF_ACCOUNT_TAG. */
+async function getWebAnalytics(env, requestHost, days = 7) {
+
+  const end = new Date();
+  const start = new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
+
+  const query = `
+    query WebAnalytics($accountTag: string!, $filter: AccountRumPageloadEventsAdaptiveGroupsFilter_InputObject) {
+      viewer {
+        accounts(filter: { accountTag: $accountTag }) {
+          rumPageloadEventsAdaptiveGroups(limit: 1000, filter: $filter) {
+            sum { visits }
+            dimensions { countryName }
+          }
+        }
+      }
+    }
+  `;
+
+  const variables = {
+    accountTag: env.CF_ACCOUNT_TAG,
+    filter: {
+      AND: [
+        { datetime_geq: start.toISOString(), datetime_leq: end.toISOString() },
+        { requestHost }
+      ]
+    }
+  };
+
+  try {
+
+    const response = await fetch("https://api.cloudflare.com/client/v4/graphql", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + env.CF_API_TOKEN,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ query, variables })
+    });
+
+    const json = await response.json();
+
+    if (!response.ok || json.errors) {
+      return { total: 0, byCountry: {}, error: json.errors ? JSON.stringify(json.errors) : "HTTP " + response.status };
+    }
+
+    const groups = json?.data?.viewer?.accounts?.[0]?.rumPageloadEventsAdaptiveGroups || [];
+
+    const byCountry = {};
+    let total = 0;
+
+    for (const g of groups) {
+      const country = g.dimensions?.countryName || "??";
+      const visits = g.sum?.visits || 0;
+      byCountry[country] = (byCountry[country] || 0) + visits;
+      total += visits;
+    }
+
+    return { total, byCountry };
+
+  } catch (err) {
+    return { total: 0, byCountry: {}, error: err.message };
+  }
+
+}
+
 async function gatherAllData(env) {
-  const [leads, watchlist, accounts] = await Promise.all([
+  const [leads, watchlist, accounts, radarVisits, guardianVisits] = await Promise.all([
     getArrayKey(env.RADAR_KV, "leads"),
     getArrayKey(env.GUARDIAN_KV, "watchlist"),
     listByPrefix(env.GUARDIAN_KV, "account:"),
+    getWebAnalytics(env, "crypto-radar-1c9.pages.dev", 7),
+    getWebAnalytics(env, "wallet-guardian.pages.dev", 7),
   ]);
 
   // Leads: más recientes primero (sí tienen ts)
@@ -142,8 +213,8 @@ async function gatherAllData(env) {
   accounts.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
   return {
-    radar: { leads },
-    guardian: { watchlist, accounts },
+    radar: { leads, visits: radarVisits },
+    guardian: { watchlist, accounts, visits: guardianVisits },
     generated_at: Date.now(),
   };
 }
@@ -272,6 +343,13 @@ function fmtDate(ts){
   return new Date(ts).toLocaleString("es-AR");
 }
 
+// Corta cualquier texto sospechosamente largo (spam, bugs, inputs sin
+// validar) para que no rompa el layout del dashboard.
+function truncate(str, max = 120){
+  if (typeof str !== "string") return str;
+  return str.length > max ? str.slice(0, max) + "…" : str;
+}
+
 function renderCard(title, items, renderItem, note){
   const rows = items.length
     ? items.map(it => \`<div class="item">\${renderItem(it)}</div>\`).join("")
@@ -283,6 +361,29 @@ function renderCard(title, items, renderItem, note){
     </div>\`;
 }
 
+const COUNTRY_FLAGS = {}; // Cloudflare ya te da el código ISO (AR, US, BR...), suficiente para mostrar
+
+function renderVisitsCard(title, visits){
+  if (visits.error) {
+    return \`<div class="card">
+        <h2>\${title}</h2>
+        <div class="empty">No se pudo consultar Cloudflare todavía.</div>
+        <div class="note">\${visits.error}</div>
+      </div>\`;
+  }
+  const countryEntries = Object.entries(visits.byCountry || {}).sort((a,b) => b[1]-a[1]).slice(0,8);
+  const rows = countryEntries.length
+    ? countryEntries.map(([country,count]) =>
+        \`<div class="item">\${country} <span class="meta">\${count} visita\${count===1?"":"s"}</span></div>\`
+      ).join("")
+    : '<div class="empty">Sin visitas registradas todavía</div>';
+  return \`<div class="card">
+      <h2>\${title} <span class="badge">\${visits.total || 0}</span></h2>
+      <div class="note" style="margin-bottom:.5rem">Últimos 7 días · por país (datos reales de Cloudflare Web Analytics)</div>
+      \${rows}
+    </div>\`;
+}
+
 async function load(){
   document.getElementById("updated").textContent = "Actualizando...";
   const res = await fetch("/api/data");
@@ -291,16 +392,19 @@ async function load(){
 
   grid.innerHTML =
     renderCard("🎯 Leads PRO — Crypto Radar", data.radar.leads,
-      l => \`\${l.email || "(sin email)"} — \${l.interest || "?"}<div class="meta">\${fmtDate(l.ts)}</div>\`) +
+      l => \`\${truncate(l.email) || "(sin email)"} — \${truncate(l.interest) || "?"}<div class="meta">\${fmtDate(l.ts)}</div>\`) +
 
     renderCard("🔑 Pedidos API Key — Crypto Radar", [],
       () => "", "No se guarda en KV todavía — llega solo por email de PayPal.") +
 
     renderCard("🛡️ Wallets registradas — Wallet Guardian", data.guardian.watchlist,
-      w => \`\${w.address}<div class="meta">\${w.email || "(sin email)"}</div>\`) +
+      w => \`\${truncate(w.address)}<div class="meta">\${truncate(w.email) || "(sin email)"}</div>\`) +
 
     renderCard("💳 Cuentas/Planes — Wallet Guardian", data.guardian.accounts,
-      a => \`Plan: \${a.plan || "?"}<div class="meta">\${fmtDate(a.createdAt)}</div>\`);
+      a => \`Plan: \${truncate(a.plan) || "?"}<div class="meta">\${fmtDate(a.createdAt)}</div>\`) +
+
+    renderVisitsCard("📈 Visitantes — Crypto Radar", data.radar.visits) +
+    renderVisitsCard("📈 Visitantes — Wallet Guardian", data.guardian.visits);
 
   document.getElementById("updated").textContent =
     "Última actualización: " + new Date(data.generated_at).toLocaleString("es-AR");
