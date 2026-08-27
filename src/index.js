@@ -188,13 +188,9 @@ async function getWebAnalytics(env, requestHost, days = 7) {
             sum { visits }
             dimensions { refererHost }
           }
-          byHour: rumPageloadEventsAdaptiveGroups(limit: 1000, filter: $filter) {
-            sum { visits }
-            dimensions { datetimeHour }
-          }
           byDetail: rumPageloadEventsAdaptiveGroups(limit: 1000, filter: $filter) {
             sum { visits }
-            dimensions { refererHost datetimeHour requestPath }
+            dimensions { refererHost datetimeMinute requestPath }
           }
         }
       }
@@ -225,7 +221,7 @@ async function getWebAnalytics(env, requestHost, days = 7) {
     const json = await response.json();
 
     if (!response.ok || json.errors) {
-      return { total: 0, byCountry: {}, byDay: {}, byReferer: {}, byHour: {}, error: json.errors ? JSON.stringify(json.errors) : "HTTP " + response.status };
+      return { total: 0, byCountry: {}, byDay: {}, byReferer: {}, detail: [], error: json.errors ? JSON.stringify(json.errors) : "HTTP " + response.status };
     }
 
     const account = json?.data?.viewer?.accounts?.[0] || {};
@@ -251,36 +247,32 @@ async function getWebAnalytics(env, requestHost, days = 7) {
       byReferer[referer] = (byReferer[referer] || 0) + (g.sum?.visits || 0);
     }
 
-    // Cloudflare devuelve la hora en UTC — la convertimos a ART (UTC-3)
-    // para que tenga sentido de un vistazo.
-    const byHour = {};
-    for (const g of account.byHour || []) {
-      const utcHour = g.dimensions?.datetimeHour;
-      if (utcHour === undefined || utcHour === null) continue;
-      const localHour = ((Number(utcHour) - 3) % 24 + 24) % 24;
-      byHour[localHour] = (byHour[localHour] || 0) + (g.sum?.visits || 0);
-    }
-
-    // Tabla simple: cada fila es una combinación real de origen + hora + URL
+    // Tabla simple: cada fila es una combinación real de origen + hora + URL.
+    // datetimeMinute viene como timestamp completo (ej: "2026-08-27T14:32:00Z"),
+    // así que parseamos la hora real con Date en vez de asumir un número 0-23.
     const detail = [];
     for (const g of account.byDetail || []) {
-      const utcHour = g.dimensions?.datetimeHour;
-      const localHour = (utcHour === undefined || utcHour === null)
-        ? null
-        : ((Number(utcHour) - 3) % 24 + 24) % 24;
+      const minuteRaw = g.dimensions?.datetimeMinute;
+      let localHour = null;
+      if (minuteRaw) {
+        const d = new Date(minuteRaw);
+        if (!isNaN(d.getTime())) {
+          localHour = ((d.getUTCHours() - 3) % 24 + 24) % 24; // UTC → ART (UTC-3)
+        }
+      }
       detail.push({
         referer: g.dimensions?.refererHost || "(directo / sin origen)",
         hour: localHour,
-        path: g.dimensions?.requestPath || "/",
+        path: g.dimensions?.requestPath || "(sin datos)",
         visits: g.sum?.visits || 0
       });
     }
     detail.sort((a, b) => b.visits - a.visits);
 
-    return { total, byCountry, byDay, byReferer, byHour, detail: detail.slice(0, 30) };
+    return { total, byCountry, byDay, byReferer, detail: detail.slice(0, 30) };
 
   } catch (err) {
-    return { total: 0, byCountry: {}, byDay: {}, byReferer: {}, byHour: {}, error: err.message };
+    return { total: 0, byCountry: {}, byDay: {}, byReferer: {}, detail: [], error: err.message };
   }
 
 }
