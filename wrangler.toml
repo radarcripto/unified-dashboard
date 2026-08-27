@@ -29,3 +29,10 @@ crons = ["*/15 * * * *"]
 #                              adivinable (no hace falta que sea un hash real)
 #     - TELEGRAM_BOT_TOKEN   → podés reusar el mismo bot de Wallet Guardian
 #     - TELEGRAM_CHAT_ID
+#     - CF_API_TOKEN         → API token de Cloudflare con permiso
+#                              "Account → Account Analytics → Read"
+#                              (My Profile / Manage Account → API Tokens →
+#                              Create Custom Token)
+#     - CF_ACCOUNT_TAG       → tu Account ID de Cloudflare (lo ves en el
+#                              panel lateral de cualquier dominio, o en
+#                              Workers & Pages → Overview)
